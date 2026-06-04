@@ -16,7 +16,10 @@ To run:
     venv/Scripts/python.exe seed_sample_data.py
 """
 import os
+import sys
 import django
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'exam_scheduler.settings')
 django.setup()
@@ -24,6 +27,7 @@ django.setup()
 from scheduling.models import (
     TimetableProject, Course, Hall,
     ProjectCourse, ProjectHall, Constraint,
+    Student, Enrollment,
 )
 from django.contrib.auth import get_user_model
 
@@ -221,7 +225,142 @@ def run():
 
     print(f"[OK] Constraints initialized")
 
-    # -- Summary ───────────────────────────────────────────────────────────────
+    # -- Seed Demo Students & Enrollments ──────────────────────────────────────
+    # Clear existing demo data
+    Enrollment.objects.filter(project=project).delete()
+    Student.objects.filter(matric_no__startswith='DEMO-').delete()
+    print(f"[OK] Cleared old demo students and enrollments")
+
+    dept_prefixes = {
+        "Computer Science": "CSC",
+        "Mass Communication": "MAC",
+        "Mechanical Engineering": "MEE",
+        "Nursing Science": "NSC",
+        "Economics": "ECN",
+        "Political Science": "POL"
+    }
+
+    project_courses = {pc.course.code: pc for pc in ProjectCourse.objects.filter(project=project)}
+    student_count_seeded = 0
+    enrollment_count_seeded = 0
+
+    for dept_name, prefix in dept_prefixes.items():
+        # Create 100L students (4 students)
+        for i in range(1, 5):
+            matric = f"DEMO-24-{prefix}-{i:03d}"
+            student = Student.objects.create(
+                matric_no=matric,
+                department=dept_name,
+                level=100
+            )
+            student_count_seeded += 1
+            
+            # Enroll in 100L core course (e.g. prefix + " 101")
+            core_code = f"{prefix} 101"
+            if core_code in project_courses:
+                Enrollment.objects.create(
+                    project=project,
+                    student=student,
+                    project_course=project_courses[core_code],
+                    is_carryover=False
+                )
+                enrollment_count_seeded += 1
+            
+            # Enroll in general courses: GST 111, GST 112
+            for gst in ["GST 111", "GST 112"]:
+                if gst in project_courses:
+                    Enrollment.objects.create(
+                        project=project,
+                        student=student,
+                        project_course=project_courses[gst],
+                        is_carryover=False
+                    )
+                    enrollment_count_seeded += 1
+
+        # Create 200L students (3 students)
+        for i in range(1, 4):
+            matric = f"DEMO-23-{prefix}-{i:03d}"
+            student = Student.objects.create(
+                matric_no=matric,
+                department=dept_name,
+                level=200
+            )
+            student_count_seeded += 1
+
+            # Enroll in 200L core courses (e.g. prefix + " 201", prefix + " 211")
+            for suffix in ["201", "211"]:
+                core_code = f"{prefix} {suffix}"
+                if core_code in project_courses:
+                    Enrollment.objects.create(
+                        project=project,
+                        student=student,
+                        project_course=project_courses[core_code],
+                        is_carryover=False
+                    )
+                    enrollment_count_seeded += 1
+
+            # Carryover triggers:
+            # Student 1 gets core 101 as carryover
+            if i == 1:
+                core_101 = f"{prefix} 101"
+                if core_101 in project_courses:
+                    Enrollment.objects.create(
+                        project=project,
+                        student=student,
+                        project_course=project_courses[core_101],
+                        is_carryover=True
+                    )
+                    enrollment_count_seeded += 1
+
+            # Student 2 gets GST 111 as carryover
+            if i == 2:
+                gst_111 = "GST 111"
+                if gst_111 in project_courses:
+                    Enrollment.objects.create(
+                        project=project,
+                        student=student,
+                        project_course=project_courses[gst_111],
+                        is_carryover=True
+                    )
+                    enrollment_count_seeded += 1
+
+        # Create 300L students (3 students)
+        for i in range(1, 4):
+            matric = f"DEMO-22-{prefix}-{i:03d}"
+            student = Student.objects.create(
+                matric_no=matric,
+                department=dept_name,
+                level=300
+            )
+            student_count_seeded += 1
+
+            # Enroll in 300L core course (e.g. prefix + " 301")
+            core_code = f"{prefix} 301"
+            if core_code in project_courses:
+                Enrollment.objects.create(
+                    project=project,
+                    student=student,
+                    project_course=project_courses[core_code],
+                    is_carryover=False
+                )
+                enrollment_count_seeded += 1
+
+            # Carryover triggers:
+            # Student 1 gets core 201 as carryover
+            if i == 1:
+                core_201 = f"{prefix} 201"
+                if core_201 in project_courses:
+                    Enrollment.objects.create(
+                        project=project,
+                        student=student,
+                        project_course=project_courses[core_201],
+                        is_carryover=True
+                    )
+                    enrollment_count_seeded += 1
+
+    print(f"[OK] Seeded {student_count_seeded} students and {enrollment_count_seeded} enrollments with carryovers.")
+
+    # -- Summary ---------------------------------------------------------------
     print()
     print("=" * 60)
     print(f"PROJECT: {PROJECT_NAME}  (id={project.id})")
@@ -234,21 +373,21 @@ def run():
     print(f"  Total single capacity:  {total_single} seats/slot")
     print(f"  Total mixed capacity:   {total_mixed} seats/slot")
     print()
-    print("  ── What each course triggers ──")
+    print("  -- What each course triggers --")
     for code, _, dept, _, cap in SAMPLE_COURSES:
         flag = ""
         if cap > total_single:
-            flag = "⚠ MUST SPLIT (exceeds all-single capacity)"
+            flag = "! MUST SPLIT (exceeds all-single capacity)"
         elif cap > max(h[2] for h in SAMPLE_HALLS):
-            flag = "→ needs largest hall OR split"
+            flag = "-> needs largest hall OR split"
         elif cap <= 10:
-            flag = "→ tiny: triggers pairing post-pass"
+            flag = "-> tiny: triggers pairing post-pass"
         print(f"  {code:<10} cap={cap:>4}  dept={dept[:22]:<22}  {flag}")
 
     print()
-    print("  ── Next step ──")
+    print("  -- Next step --")
     print(f"  1. Go to the frontend and open project id={project.id}")
-    print(f"  2. Generate timeslots (e.g. 5 days Mon–Fri)")
+    print(f"  2. Generate timeslots (e.g. 5 days Mon-Fri)")
     print(f"  3. Click Generate Timetable")
     print(f"  4. Verify the output against the expected behaviours in the deep dive doc")
     print()

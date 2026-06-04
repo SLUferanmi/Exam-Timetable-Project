@@ -21,9 +21,79 @@ class TimetableProjectSerializer(serializers.ModelSerializer):
         read_only_fields = ('created_by', 'created_at')
 
 class StudentSerializer(serializers.ModelSerializer):
+    courses = serializers.SerializerMethodField()
+
     class Meta:
         model = Student
-        fields = '__all__'
+        fields = ['id', 'matric_no', 'department', 'level', 'courses']
+
+    def get_courses(self, obj):
+        enrolls = Enrollment.objects.filter(student=obj).select_related('project_course__course', 'project')
+        return [{
+            'id': e.id,
+            'project_id': e.project.id,
+            'project_name': e.project.name,
+            'project_course_id': e.project_course.id,
+            'course_code': e.project_course.course.code,
+            'course_title': e.project_course.course.title,
+            'is_carryover': e.is_carryover
+        } for e in enrolls]
+
+    def create(self, validated_data):
+        request = self.context.get('request')
+        enrollments_data = request.data.get('enrollments', []) if request else []
+        project_id = request.data.get('project_id') if request else None
+
+        student = Student.objects.create(**validated_data)
+
+        if project_id and enrollments_data:
+            try:
+                project = TimetableProject.objects.get(id=project_id)
+                for item in enrollments_data:
+                    pc_id = item.get('project_course_id')
+                    is_c = bool(item.get('is_carryover', False))
+                    pc = ProjectCourse.objects.get(id=pc_id, project=project)
+                    Enrollment.objects.create(
+                        project=project,
+                        student=student,
+                        project_course=pc,
+                        is_carryover=is_c
+                    )
+            except Exception as e:
+                print(f"Error creating enrollments: {e}")
+
+        return student
+
+    def update(self, instance, validated_data):
+        request = self.context.get('request')
+        enrollments_data = request.data.get('enrollments', []) if request else []
+        project_id = request.data.get('project_id') if request else None
+
+        # Update student fields
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+
+        if project_id:
+            try:
+                project = TimetableProject.objects.get(id=project_id)
+                # Clear existing enrollments for this student in this project
+                Enrollment.objects.filter(student=instance, project=project).delete()
+                # Re-create
+                for item in enrollments_data:
+                    pc_id = item.get('project_course_id')
+                    is_c = bool(item.get('is_carryover', False))
+                    pc = ProjectCourse.objects.get(id=pc_id, project=project)
+                    Enrollment.objects.create(
+                        project=project,
+                        student=instance,
+                        project_course=pc,
+                        is_carryover=is_c
+                    )
+            except Exception as e:
+                print(f"Error updating enrollments: {e}")
+
+        return instance
 
 class GlobalCourseSerializer(serializers.ModelSerializer):
     class Meta:

@@ -162,6 +162,8 @@ const ProjectDetail = () => {
     const [schedule, setSchedule] = useState([]);
     const [loading, setLoading] = useState(true);
     const [generating, setGenerating] = useState(false);
+    const [progress, setProgress] = useState(0);
+    const [progressStep, setProgressStep] = useState(0);
     const [unscheduledCourses, setUnscheduledCourses] = useState([]);
     const [showDatePicker, setShowDatePicker] = useState(false);
     const [startDate, setStartDate] = useState('');
@@ -220,17 +222,50 @@ const ProjectDetail = () => {
 
     const handleGenerate = async () => {
         setGenerating(true);
+        setProgress(0);
+        setProgressStep(0);
         setUnscheduledCourses([]);
+
+        // Timer interval to increment progress bar smoothly
+        const intervalId = setInterval(() => {
+            setProgress((prev) => {
+                if (prev < 20) {
+                    setProgressStep(0);
+                    return prev + 0.6;
+                } else if (prev < 45) {
+                    setProgressStep(1);
+                    return prev + 0.45;
+                } else if (prev < 70) {
+                    setProgressStep(2);
+                    return prev + 0.35;
+                } else if (prev < 90) {
+                    setProgressStep(3);
+                    return prev + 0.2;
+                } else if (prev < 95) {
+                    setProgressStep(4);
+                    return prev + 0.04; // slow down near completion
+                }
+                return prev;
+            });
+        }, 30);
+
         try {
             const res = await api.post(`projects/${id}/generate/`);
+            clearInterval(intervalId);
+            setProgress(100);
+            setProgressStep(5);
+            // Wait a brief moment to show the 100% checkmark before closing
+            await new Promise((resolve) => setTimeout(resolve, 600));
             await fetchData();
             if (res.data.unscheduled?.length > 0) {
                 setUnscheduledCourses(res.data.unscheduled);
             }
         } catch (error) {
+            clearInterval(intervalId);
             console.error('Error generating schedule:', error);
             alert('Failed to generate schedule. Please check console for details.');
         } finally {
+            clearInterval(intervalId);
             setGenerating(false);
         }
     };
@@ -574,6 +609,67 @@ const ProjectDetail = () => {
                                 ))}
                             </tbody>
                         </table>
+                    </div>
+                )}
+
+                {/* Progress Loading Overlay */}
+                {generating && (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-stone-900/60 backdrop-blur-sm">
+                        <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 border border-stone-200 animate-in fade-in zoom-in duration-200">
+                            <div className="text-center mb-6">
+                                <h3 className="text-lg font-bold text-stone-900 mb-1">Generating Timetable</h3>
+                                <p className="text-sm text-stone-500">Please wait while the algorithm designs the schedule.</p>
+                            </div>
+
+                            {/* Progress Bar */}
+                            <div className="mb-6">
+                                <div className="flex justify-between items-center mb-2">
+                                    <span className="text-xs font-semibold text-stone-500 uppercase tracking-wide">Overall Progress</span>
+                                    <span className="text-sm font-bold text-amber-700">{Math.round(progress)}%</span>
+                                </div>
+                                <div className="w-full bg-stone-100 rounded-full h-3 overflow-hidden border border-stone-200/50">
+                                    <div 
+                                        className="bg-gradient-to-r from-amber-600 to-amber-800 h-full rounded-full transition-all duration-300 ease-out"
+                                        style={{ width: `${progress}%` }}
+                                    />
+                                </div>
+                            </div>
+
+                            {/* Steps Checklist */}
+                            <div className="space-y-3.5 bg-stone-50 rounded-xl p-4 border border-stone-200/60">
+                                {[
+                                    "Load courses & settings",
+                                    "Verify conflict constraints",
+                                    "Run timeslot optimization",
+                                    "Allocate & share exam halls",
+                                    "Commit schedule to database"
+                                ].map((stepLabel, idx) => {
+                                    const isDone = progressStep > idx;
+                                    const isActive = progressStep === idx;
+                                    return (
+                                        <div key={idx} className="flex items-center gap-3">
+                                            <div className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold ${
+                                                isDone ? 'bg-green-100 text-green-700 border border-green-200' :
+                                                isActive ? 'bg-amber-100 text-amber-800 border border-amber-300 animate-pulse' :
+                                                'bg-stone-100 text-stone-400 border border-stone-200'
+                                            }`}>
+                                                {isDone ? '✓' : idx + 1}
+                                            </div>
+                                            <span className={`text-xs font-medium ${
+                                                isDone ? 'text-stone-500 line-through' :
+                                                isActive ? 'text-stone-900 font-semibold' :
+                                                'text-stone-400'
+                                            }`}>
+                                                {stepLabel}
+                                            </span>
+                                            {isActive && (
+                                                <div className="w-1.5 h-1.5 bg-amber-600 rounded-full animate-ping ml-auto" />
+                                            )}
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </div>
                     </div>
                 )}
             </div>
