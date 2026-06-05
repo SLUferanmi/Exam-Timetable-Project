@@ -7,18 +7,21 @@ Each forced placement records exactly which constraints were violated and how ma
 These show as RED cards in the frontend with hover details.
 """
 from collections import defaultdict
-from scheduling.models import ProjectCourse, ProjectHall, TimeSlot, ExamSchedule, Enrollment, CoursePreference, Constraint
+from scheduling.models import TimetableProject, ProjectCourse, ProjectHall, TimeSlot, ExamSchedule, Enrollment, CoursePreference, Constraint
 
 
 class ImprovedSchedulerWithVenueSharing:
     def __init__(self, project):
         self.project = project
 
-        self.project_courses = list(
-            ProjectCourse.objects.filter(project=project, required_capacity__gt=0)
-            .select_related('course')
-            .order_by('course__department', '-required_capacity')
-        )
+        # Check if project has any student enrollments
+        enrollment_qs = Enrollment.objects.filter(project=project)
+        has_enrollments = enrollment_qs.exists()
+
+        # Ensure all base constraints exist
+        for c_type, _ in Constraint.CONSTRAINT_TYPES:
+            Constraint.objects.get_or_create(project=project, constraint_type=c_type, defaults={'enabled': True})
+
         self.project_halls = list(
             ProjectHall.objects.filter(project=project, is_active=True)
             .select_related('hall')
@@ -32,6 +35,7 @@ class ImprovedSchedulerWithVenueSharing:
             .values_list('constraint_type', flat=True)
         )
         self.check_student_conflicts   = 'student_conflict'   in enabled_constraints
+        self.check_carryover_conflicts = 'carryover_conflict' in enabled_constraints
         self.check_dept_conflicts      = 'department_conflict' in enabled_constraints
         self.check_venue_cap           = 'venue_capacity'      in enabled_constraints
         self.enabled_constraint_types  = enabled_constraints
@@ -39,6 +43,7 @@ class ImprovedSchedulerWithVenueSharing:
         # Human-readable labels for violation reporting
         self.constraint_labels = {
             'student_conflict':   'No student has two exams at the same time',
+            'carryover_conflict': 'No student has a clash with their carryover courses',
             'department_conflict':'No department has two exams at the same time',
             'venue_capacity':     'Venue capacity must accommodate all students',
         }
@@ -46,6 +51,7 @@ class ImprovedSchedulerWithVenueSharing:
         # Tracking state
         self.venue_usage      = defaultdict(lambda: defaultdict(list))
         self.student_schedule = defaultdict(set)   # student_id -> {timeslot_ids}
+        self.student_carryover_schedule = defaultdict(set) # student_id -> {timeslot_ids}
         self.dept_schedule    = defaultdict(set)   # department  -> {timeslot_ids}
         self.course_assignments = defaultdict(list) # pc.id -> [(ts, ph, count, guided, violations)]
 
@@ -54,12 +60,50 @@ class ImprovedSchedulerWithVenueSharing:
         for pref in CoursePreference.objects.all():
             self.preferences[pref.course_code][pref.hall_name] = pref
 
-        # Prefetch enrollments for the current project to prevent N+1 queries in conflict checks
-        self.course_students = defaultdict(set)
-        for enrollment in Enrollment.objects.filter(project=project).values('project_course_id', 'student_id'):
-            self.course_students[enrollment['project_course_id']].add(enrollment['student_id'])
+        if not has_enrollments:
+            # Load all project courses
+            all_courses = list(
+                ProjectCourse.objects.filter(project=project)
+                .select_related('course')
+            )
+            
+            # Map demo enrollments by course code
+            self.course_students = defaultdict(set)
+            self.carryover_students = defaultdict(set)
+            demo_project = TimetableProject.objects.filter(name="Algorithm Test — Sample 32 Courses").first()
+            if demo_project:
+                demo_enrollments = Enrollment.objects.filter(project=demo_project).select_related('project_course__course')
+                current_pcs = {pc.course.code: pc for pc in all_courses}
+                for enrollment in demo_enrollments:
+                    code = enrollment.project_course.course.code
+                    if code in current_pcs:
+                        pc = current_pcs[code]
+                        self.course_students[pc.id].add(enrollment.student_id)
+                        if enrollment.is_carryover:
+                            self.carryover_students[pc.id].add(enrollment.student_id)
+            
+            # Dynamically set course capacities based on fallback enrollments if they are 0
+            for pc in all_courses:
+                if pc.required_capacity == 0:
+                    pc.required_capacity = len(self.course_students[pc.id])
+            
+            # Filter and sort
+            self.project_courses = [pc for pc in all_courses if pc.required_capacity > 0]
+            self.project_courses.sort(key=lambda x: (x.course.department, -x.required_capacity))
+        else:
+            self.project_courses = list(
+                ProjectCourse.objects.filter(project=project, required_capacity__gt=0)
+                .select_related('course')
+                .order_by('course__department', '-required_capacity')
+            )
+            self.course_students = defaultdict(set)
+            self.carryover_students = defaultdict(set)
+            for enrollment in enrollment_qs.values('project_course_id', 'student_id', 'is_carryover'):
+                self.course_students[enrollment['project_course_id']].add(enrollment['student_id'])
+                if enrollment['is_carryover']:
+                    self.carryover_students[enrollment['project_course_id']].add(enrollment['student_id'])
 
-        print(f"\n📊 Scheduler initialized:")
+        print(f"\n[Stats] Scheduler initialized:")
         print(f"   Courses:  {len(self.project_courses)}")
         print(f"   Venues:   {len(self.project_halls)}")
         print(f"   Slots:    {len(self.timeslots)}")
@@ -133,6 +177,17 @@ class ImprovedSchedulerWithVenueSharing:
                 return False
         return True
 
+    def check_carryover_conflict(self, project_course, timeslot):
+        if not self.check_carryover_conflicts:
+            return False
+        for sid in self.get_course_students(project_course):
+            if timeslot.id in self.student_schedule.get(sid, set()):
+                is_curr_carryover = sid in self.carryover_students.get(project_course.id, set())
+                is_other_carryover = timeslot.id in self.student_carryover_schedule.get(sid, set())
+                if is_curr_carryover or is_other_carryover:
+                    return True
+        return False
+
     # ──────────────────────────────────────────────
     # Constraint evaluation helpers
     # ──────────────────────────────────────────────
@@ -157,6 +212,22 @@ class ImprovedSchedulerWithVenueSharing:
                     'constraint_type': 'student_conflict',
                     'label': self.constraint_labels['student_conflict'],
                     'detail': f"{len(conflicting_students)} student(s) already have an exam in this slot."
+                })
+
+        # 1b. Carryover conflict
+        if 'carryover_conflict' in self.enabled_constraint_types:
+            conflicting_students = []
+            for sid in self.get_course_students(project_course):
+                if timeslot.id in self.student_schedule.get(sid, set()):
+                    is_curr_carryover = sid in self.carryover_students.get(project_course.id, set())
+                    is_other_carryover = timeslot.id in self.student_carryover_schedule.get(sid, set())
+                    if is_curr_carryover or is_other_carryover:
+                        conflicting_students.append(sid)
+            if conflicting_students:
+                violations.append({
+                    'constraint_type': 'carryover_conflict',
+                    'label': self.constraint_labels['carryover_conflict'],
+                    'detail': f"{len(conflicting_students)} student(s) have a clash with a carryover course in this slot."
                 })
 
         # 2. Department conflict
@@ -201,6 +272,8 @@ class ImprovedSchedulerWithVenueSharing:
         course_students = self.get_course_students(project_course)
         for sid in course_students:
             self.student_schedule[sid].add(timeslot.id)
+            if sid in self.carryover_students.get(project_course.id, set()):
+                self.student_carryover_schedule[sid].add(timeslot.id)
         self.dept_schedule[project_course.course.department].add(timeslot.id)
         self.course_assignments[project_course.id].append(
             (timeslot, project_hall, student_count, preference_guided, violations)
@@ -267,7 +340,7 @@ class ImprovedSchedulerWithVenueSharing:
                     best_option = (rank, violation_count, score, guided, ts, ph, violations)
 
         if best_option is None:
-            print(f"   ❌ No slots or halls available for {code} — truly unschedulable.")
+            print(f"   [Error] No slots or halls available for {code} — truly unschedulable.")
             return False
 
         _, violation_count, score, guided, ts, ph, violations = best_option
@@ -281,7 +354,7 @@ class ImprovedSchedulerWithVenueSharing:
 
         slot_str = f"{ts.date} {ts.start_time}"
         viol_names = [v['constraint_type'] for v in violations]
-        print(f"   ⚠️  Force-placed {code} → {ph.hall.name} @ {slot_str} "
+        print(f"   [Warning] Force-placed {code} -> {ph.hall.name} @ {slot_str} "
               f"| Violated: {viol_names or 'none'}")
         return True
 
@@ -291,7 +364,7 @@ class ImprovedSchedulerWithVenueSharing:
 
     def schedule_exams(self):
         """Main scheduling loop. Returns list of truly unschedulable course codes."""
-        print(f"\n🔄 Starting scheduling process...")
+        print(f"\n[Info] Starting scheduling process...")
         truly_unscheduled = []
         scheduled_clean = 0
         scheduled_forced = 0
@@ -309,6 +382,8 @@ class ImprovedSchedulerWithVenueSharing:
 
             for timeslot in sorted_ts:
                 if self.check_student_conflict(project_course, timeslot):
+                    continue
+                if self.check_carryover_conflict(project_course, timeslot):
                     continue
                 if self.check_department_conflict(project_course, timeslot):
                     continue
@@ -343,7 +418,7 @@ class ImprovedSchedulerWithVenueSharing:
                 else:
                     truly_unscheduled.append(project_course.course.code)
 
-        print(f"\n✅ Scheduling complete!")
+        print(f"\n[OK] Scheduling complete!")
         print(f"   Clean placements:  {scheduled_clean}")
         print(f"   Forced placements: {scheduled_forced}")
         print(f"   Truly unscheduled: {len(truly_unscheduled)}")
@@ -353,7 +428,7 @@ class ImprovedSchedulerWithVenueSharing:
         return truly_unscheduled
 
     def _enforce_minimum_pairing(self):
-        print("\n🔗 Enforcing minimum pairing rule...")
+        print("\n[Info] Enforcing minimum pairing rule...")
         moves = 0
         assigned_ids = set(self.course_assignments.keys())
         for ph in self.project_halls:
@@ -370,6 +445,8 @@ class ImprovedSchedulerWithVenueSharing:
                             continue
                         if self.check_student_conflict(pc, ts):
                             continue
+                        if self.check_carryover_conflict(pc, ts):
+                            continue
                         if self.check_department_conflict(pc, ts):
                             continue
                         if not self.can_share_venue(pc, ph, ts):
@@ -381,7 +458,7 @@ class ImprovedSchedulerWithVenueSharing:
         print(f"   Paired {moves} lone-course halls.")
 
     def _create_schedule_records(self):
-        print(f"\n💾 Creating schedule records...")
+        print(f"\n[Info] Creating schedule records...")
         ExamSchedule.objects.filter(project=self.project).delete()
         schedules = []
         guided_count = 0
@@ -415,12 +492,12 @@ class ImprovedSchedulerWithVenueSharing:
                     forced_count += 1
 
         ExamSchedule.objects.bulk_create(schedules)
-        print(f"   ✓ Created {len(schedules)} schedule records")
-        print(f"   📈 Data-guided: {guided_count}  |  ⚠️  Forced (violated): {forced_count}")
+        print(f"   [OK] Created {len(schedules)} schedule records")
+        print(f"   [Stats] Data-guided: {guided_count}  |  [Warning] Forced (violated): {forced_count}")
         self._print_venue_stats()
 
     def _print_venue_stats(self):
-        print(f"\n📊 Venue Utilization:")
+        print(f"\n[Stats] Venue Utilization:")
         total_used = 0
         total_avail = 0
         for ph in self.project_halls:

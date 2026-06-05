@@ -5,9 +5,45 @@ import { Card, Button, Badge } from '../components/UI';
 import api from '../api';
 import { Download, AlertTriangle, Calendar, MapPin, Clock, Zap, RefreshCw, ArrowLeft, Users, Settings, ShieldAlert, ShieldCheck, BarChart2, History } from 'lucide-react';
 
+// ── ConstraintsChecklist ──────────────────────────────────────────────────────
+const ConstraintsChecklist = ({ examViolations, projectConstraints }) => {
+    const defaultConstraints = [
+        { constraint_type: 'student_conflict', constraint_label: 'No student has two exams at the same time', enabled: true },
+        { constraint_type: 'carryover_conflict', constraint_label: 'No student has a clash with their carryover courses', enabled: true },
+        { constraint_type: 'venue_capacity', constraint_label: 'Venue capacity must accommodate all students', enabled: true },
+        { constraint_type: 'department_conflict', constraint_label: 'No department has two exams at the same time', enabled: true }
+    ];
+
+    const list = projectConstraints && projectConstraints.length > 0 ? projectConstraints : defaultConstraints;
+    const enabledList = list.filter(c => c.enabled);
+
+    return (
+        <div className="mt-3 pt-3 border-t border-stone-800">
+            <div className="text-stone-400 font-semibold uppercase tracking-wide text-[10px] mb-2">Constraints Checklist</div>
+            <div className="space-y-1.5">
+                {enabledList.map(c => {
+                    const isViolated = examViolations && examViolations.some(v => v.constraint_type === c.constraint_type);
+                    return (
+                        <div key={c.constraint_type} className="flex items-center gap-2 text-[11px] leading-tight">
+                            <span className={`w-4 h-4 rounded-full flex items-center justify-center shrink-0 text-[10px] font-bold ${
+                                isViolated ? 'bg-red-950/60 text-red-400 border border-red-900/50' : 'bg-green-950/60 text-green-400 border border-green-900/50'
+                            }`}>
+                                {isViolated ? '✗' : '✓'}
+                            </span>
+                            <span className={isViolated ? 'text-red-300' : 'text-stone-300'}>
+                                {c.constraint_label || c.get_constraint_type_display || c.constraint_type}
+                            </span>
+                        </div>
+                    );
+                })}
+            </div>
+        </div>
+    );
+};
+
 // ── ConstraintViolationTooltip ────────────────────────────────────────────────
 // Fixed-position popup for force-placed (red) cards. Escapes overflow containers.
-const ConstraintViolationTooltip = ({ exam, hallName, courseText }) => {
+const ConstraintViolationTooltip = ({ exam, hallName, courseText, projectConstraints }) => {
     const [pos, setPos]   = useState(null);
     const cardRef         = useRef(null);
     const violations = exam?.constraint_violations || [];
@@ -25,7 +61,7 @@ const ConstraintViolationTooltip = ({ exam, hallName, courseText }) => {
     const handleEnter = () => {
         if (!cardRef.current) return;
         const r = cardRef.current.getBoundingClientRect();
-        const tooltipH = 280;
+        const tooltipH = 340;
         const spaceBelow = window.innerHeight - r.bottom;
         const top = spaceBelow >= tooltipH ? r.bottom + 8 : r.top - tooltipH - 8;
         setPos({ top, left: Math.min(r.left, window.innerWidth - 336) });
@@ -62,9 +98,12 @@ const ConstraintViolationTooltip = ({ exam, hallName, courseText }) => {
                         <span className="font-semibold text-orange-300">{met} of {total} constraint{total !== 1 ? 's' : ''} satisfied</span>
                     </div>
                     <div className="text-stone-400 italic mb-2">No fully-valid slot existed — this is the next-best placement.</div>
+                    
+                    <ConstraintsChecklist examViolations={violations} projectConstraints={projectConstraints} />
+
                     {violations.length > 0 && (
-                        <div className="space-y-1.5">
-                            <div className="text-red-400 font-semibold uppercase tracking-wide text-[10px] mb-1">Violated Constraints:</div>
+                        <div className="space-y-1.5 mt-3 pt-3 border-t border-stone-800">
+                            <div className="text-red-400 font-semibold uppercase tracking-wide text-[10px] mb-1">Violated Details</div>
                             {violations.map((v, i) => (
                                 <div key={i} className="bg-red-900/40 rounded-lg p-2">
                                     <div className="font-semibold text-red-300 mb-0.5">{v.label}</div>
@@ -81,14 +120,14 @@ const ConstraintViolationTooltip = ({ exam, hallName, courseText }) => {
 
 // ── HistoricalPlacementTooltip ─────────────────────────────────────────────────
 // Fixed-position popup for historically-guided (amber) cards.
-const HistoricalPlacementTooltip = ({ hallExams, hallName, courseText, hasSplit, totalStudents }) => {
+const HistoricalPlacementTooltip = ({ hallExams, hallName, courseText, hasSplit, totalStudents, projectConstraints }) => {
     const [pos, setPos] = useState(null);
     const cardRef       = useRef(null);
 
     const handleEnter = () => {
         if (!cardRef.current) return;
         const r = cardRef.current.getBoundingClientRect();
-        const tooltipH = 260;
+        const tooltipH = 320;
         const spaceBelow = window.innerHeight - r.bottom;
         const top = spaceBelow >= tooltipH ? r.bottom + 8 : r.top - tooltipH - 8;
         setPos({ top, left: Math.min(r.left, window.innerWidth - 336) });
@@ -144,6 +183,9 @@ const HistoricalPlacementTooltip = ({ hallExams, hallName, courseText, hasSplit,
                             </div>
                         );
                     })}
+                    
+                    <ConstraintsChecklist examViolations={[]} projectConstraints={projectConstraints} />
+
                     {hasSplit && (
                         <div className="text-stone-400 italic text-[10px] mt-1">
                             ↔ This course is split across multiple halls in this timeslot.
@@ -169,18 +211,22 @@ const ProjectDetail = () => {
     const [startDate, setStartDate] = useState('');
     const [endDate, setEndDate] = useState('');
     const [generatingSlots, setGeneratingSlots] = useState(false);
+    const [constraints, setConstraints] = useState([]);
 
     const fetchData = async () => {
         try {
-            const pRes = await api.get(`projects/${id}/`);
+            const [pRes, sRes, cRes] = await Promise.all([
+                api.get(`projects/${id}/`),
+                api.get(`schedules/?project=${id}`),
+                api.get(`constraints/?project=${id}`)
+            ]);
             setProject(pRes.data);
+            setSchedule(sRes.data);
+            setConstraints(cRes.data);
 
             // Set dates if they exist
             if (pRes.data.exam_start_date) setStartDate(pRes.data.exam_start_date);
             if (pRes.data.exam_end_date) setEndDate(pRes.data.exam_end_date);
-
-            const sRes = await api.get(`schedules/?project=${id}`);
-            setSchedule(sRes.data);
         } catch (error) {
             console.error('Error fetching data:', error);
             if (error.response?.status === 403 || error.response?.status === 401) {
@@ -564,6 +610,7 @@ const ProjectDetail = () => {
                                                                             exam={primaryExam}
                                                                             hallName={hallName}
                                                                             courseText={courseText}
+                                                                            projectConstraints={constraints}
                                                                         />
                                                                     );
                                                                 }
@@ -577,6 +624,7 @@ const ProjectDetail = () => {
                                                                             courseText={courseText}
                                                                             hasSplit={hasSplit}
                                                                             totalStudents={totalStudents}
+                                                                            projectConstraints={constraints}
                                                                         />
                                                                     );
                                                                 }

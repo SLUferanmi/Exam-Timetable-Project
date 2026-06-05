@@ -114,6 +114,7 @@ class Constraint(models.Model):
     objects = models.Manager()
     CONSTRAINT_TYPES = [
         ('student_conflict', 'No student has two exams at the same time'),
+        ('carryover_conflict', 'No student has a clash with their carryover courses'),
         ('department_conflict', 'No department has two exams at the same time'),
         ('venue_capacity', 'Venue capacity must accommodate all students'),
     ]

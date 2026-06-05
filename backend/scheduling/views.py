@@ -316,10 +316,12 @@ class TimetableProjectViewSet(viewsets.ModelViewSet):
         # Clear existing per-project data
         ProjectCourse.objects.filter(project=project).delete()
         ProjectHall.objects.filter(project=project).delete()
+        Enrollment.objects.filter(project=project).delete()
 
         if enable:
             _seed_sample_courses(project)
             _seed_sample_halls(project)
+            _seed_demo_students(project)
         else:
             _seed_from_catalog(project)
 
@@ -335,6 +337,104 @@ class TimetableProjectViewSet(viewsets.ModelViewSet):
             'courses_loaded': course_count,
             'halls_loaded': hall_count,
         })
+
+    @action(detail=True, methods=['get'])
+    def carryovers_and_conflicts(self, request, pk=None):
+        from collections import defaultdict
+        from django.db.models import Count
+        
+        project = self.get_object()
+        
+        # Ensure all base constraints exist
+        for c_type, _ in Constraint.CONSTRAINT_TYPES:
+            Constraint.objects.get_or_create(project=project, constraint_type=c_type, defaults={'enabled': True})
+        
+        # Check if project has any enrollments
+        has_enrollments = Enrollment.objects.filter(project=project).exists()
+        
+        query_project = project
+        if not has_enrollments:
+            demo_project = TimetableProject.objects.filter(name="Algorithm Test — Sample 32 Courses").first()
+            if demo_project:
+                query_project = demo_project
+        
+        # 1. Fetch carryover courses stats
+        carryover_data = Enrollment.objects.filter(
+            project=query_project, is_carryover=True
+        ).values(
+            'project_course__course__code',
+            'project_course__course__title',
+            'project_course__course__department'
+        ).annotate(
+            student_count=Count('student')
+        ).order_by('-student_count', 'project_course__course__code')
+        
+        carryover_courses = [
+            {
+                "code": row["project_course__course__code"],
+                "title": row["project_course__course__title"],
+                "department": row["project_course__course__department"],
+                "student_count": row["student_count"]
+            }
+            for row in carryover_data
+        ]
+        
+        # 2. Fetch all project courses for conflict checking
+        project_courses = list(
+            ProjectCourse.objects.filter(project=project)
+            .select_related('course')
+        )
+        
+        # Get students mapped to each ProjectCourse
+        course_students = defaultdict(set)
+        if query_project == project:
+            for enrollment in Enrollment.objects.filter(project=project).values('project_course_id', 'student__matric_no'):
+                course_students[enrollment['project_course_id']].add(enrollment['student__matric_no'])
+        else:
+            current_pcs = {pc.course.code: pc.id for pc in project_courses}
+            demo_enrollments = Enrollment.objects.filter(project=query_project).select_related('project_course__course').values('project_course__course__code', 'student__matric_no')
+            for enrollment in demo_enrollments:
+                code = enrollment['project_course__course__code']
+                if code in current_pcs:
+                    current_pc_id = current_pcs[code]
+                    course_students[current_pc_id].add(enrollment['student__matric_no'])
+            
+        conflicts = []
+        n = len(project_courses)
+        for i in range(n):
+            for j in range(i + 1, n):
+                pc_a = project_courses[i]
+                pc_b = project_courses[j]
+                
+                students_a = course_students.get(pc_a.id, set())
+                students_b = course_students.get(pc_b.id, set())
+                shared_students = students_a.intersection(students_b)
+                if shared_students:
+                    shared_count = len(shared_students)
+                    sample_matrics = sorted(list(shared_students))[:3]
+                    sample_str = ", ".join(sample_matrics)
+                    if shared_count > 3:
+                        sample_str += f", and {shared_count - 3} others"
+                    
+                    conflicts.append({
+                        "course_a": {
+                            "code": pc_a.course.code,
+                            "title": pc_a.course.title,
+                            "department": pc_a.course.department,
+                        },
+                        "course_b": {
+                            "code": pc_b.course.code,
+                            "title": pc_b.course.title,
+                            "department": pc_b.course.department,
+                        },
+                        "reasons": [f"{shared_count} shared student(s) ({sample_str})"]
+                    })
+                    
+        return Response({
+            "carryover_courses": carryover_courses,
+            "conflicts": conflicts
+        })
+
 
 
 # ---------------------------------------------------------------------------
@@ -415,6 +515,130 @@ def _seed_from_catalog(project):
         for hall in Hall.objects.all()
     ]
     ProjectHall.objects.bulk_create(hall_rows)
+
+
+def _seed_demo_students(project):
+    """Seed the sample/demo students and enrollments into a project."""
+    dept_prefixes = {
+        "Computer Science": "CSC",
+        "Mass Communication": "MAC",
+        "Mechanical Engineering": "MEE",
+        "Nursing Science": "NSC",
+        "Economics": "ECN",
+        "Political Science": "POL"
+    }
+
+    project_courses = {pc.course.code: pc for pc in ProjectCourse.objects.filter(project=project)}
+
+    for dept_name, prefix in dept_prefixes.items():
+        # Create 100L students (4 students)
+        for i in range(1, 5):
+            matric = f"DEMO-24-{prefix}-{i:03d}"
+            student, _ = Student.objects.get_or_create(
+                matric_no=matric,
+                defaults={
+                    'department': dept_name,
+                    'level': 100
+                }
+            )
+            
+            # Enroll in 100L core course (e.g. prefix + " 101")
+            core_code = f"{prefix} 101"
+            if core_code in project_courses:
+                Enrollment.objects.get_or_create(
+                    project=project,
+                    student=student,
+                    project_course=project_courses[core_code],
+                    defaults={'is_carryover': False}
+                )
+            
+            # Enroll in general courses: GST 111, GST 112
+            for gst in ["GST 111", "GST 112"]:
+                if gst in project_courses:
+                    Enrollment.objects.get_or_create(
+                        project=project,
+                        student=student,
+                        project_course=project_courses[gst],
+                        defaults={'is_carryover': False}
+                    )
+
+        # Create 200L students (3 students)
+        for i in range(1, 4):
+            matric = f"DEMO-23-{prefix}-{i:03d}"
+            student, _ = Student.objects.get_or_create(
+                matric_no=matric,
+                defaults={
+                    'department': dept_name,
+                    'level': 200
+                }
+            )
+
+            # Enroll in 200L core courses (e.g. prefix + " 201", prefix + " 211")
+            for suffix in ["201", "211"]:
+                core_code = f"{prefix} {suffix}"
+                if core_code in project_courses:
+                    Enrollment.objects.get_or_create(
+                        project=project,
+                        student=student,
+                        project_course=project_courses[core_code],
+                        defaults={'is_carryover': False}
+                    )
+
+            # Carryover triggers:
+            # Student 1 gets core 101 as carryover
+            if i == 1:
+                core_101 = f"{prefix} 101"
+                if core_101 in project_courses:
+                    Enrollment.objects.get_or_create(
+                        project=project,
+                        student=student,
+                        project_course=project_courses[core_101],
+                        defaults={'is_carryover': True}
+                    )
+
+            # Student 2 gets GST 111 as carryover
+            if i == 2:
+                gst_111 = "GST 111"
+                if gst_111 in project_courses:
+                    Enrollment.objects.get_or_create(
+                        project=project,
+                        student=student,
+                        project_course=project_courses[gst_111],
+                        defaults={'is_carryover': True}
+                    )
+
+        # Create 300L students (3 students)
+        for i in range(1, 4):
+            matric = f"DEMO-22-{prefix}-{i:03d}"
+            student, _ = Student.objects.get_or_create(
+                matric_no=matric,
+                defaults={
+                    'department': dept_name,
+                    'level': 300
+                }
+            )
+
+            # Enroll in 300L core course (e.g. prefix + " 301")
+            core_code = f"{prefix} 301"
+            if core_code in project_courses:
+                Enrollment.objects.get_or_create(
+                    project=project,
+                    student=student,
+                    project_course=project_courses[core_code],
+                    defaults={'is_carryover': False}
+                )
+
+            # Carryover triggers:
+            # Student 1 gets core 201 as carryover
+            if i == 1:
+                core_201 = f"{prefix} 201"
+                if core_201 in project_courses:
+                    Enrollment.objects.get_or_create(
+                        project=project,
+                        student=student,
+                        project_course=project_courses[core_201],
+                        defaults={'is_carryover': True}
+                    )
 
 
 class StudentViewSet(viewsets.ModelViewSet):

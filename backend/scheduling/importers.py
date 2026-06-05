@@ -1,5 +1,5 @@
 import pandas as pd
-from .models import Student, Course, Hall, Enrollment
+from .models import Student, Course, Hall, Enrollment, ProjectCourse, ProjectHall
 
 def parse_and_import_data(project, file, data_type):
     """
@@ -17,50 +17,70 @@ def parse_and_import_data(project, file, data_type):
         
         count = 0
         if data_type == 'courses':
-            # Expected headers: course code, title, department, level, duration
             for _, row in df.iterrows():
-                # Flexible column matching
                 code = row.get('course code') or row.get('code') or row.get('course_code')
                 if not code: continue
+                code = str(code).strip().upper()
                 
-                Course.objects.create(
-                    project=project,
+                # Get or create global Course
+                course, _ = Course.objects.get_or_create(
                     code=code,
-                    title=row.get('course title') or row.get('title') or '',
-                    department=row.get('department') or 'General',
-                    duration_minutes=start_to_minutes(row.get('duration')) if row.get('duration') else 120,
-                    required_capacity=0 # Will be calculated from Enrollments if not provided
+                    defaults={
+                        'title': row.get('course title') or row.get('title') or '',
+                        'department': row.get('department') or 'General',
+                        'semester': row.get('semester') or 'First'
+                    }
+                )
+                
+                # Get or create ProjectCourse
+                pc, _ = ProjectCourse.objects.get_or_create(
+                    project=project,
+                    course=course,
+                    defaults={
+                        'required_capacity': int(row.get('required_capacity') or row.get('capacity') or 0),
+                        'duration_minutes': start_to_minutes(row.get('duration')) if row.get('duration') else 120,
+                    }
                 )
                 count += 1
                 
         elif data_type == 'halls':
-            # Expected headers: name, capacity
             for _, row in df.iterrows():
                 name = row.get('hall name') or row.get('name') or row.get('hall')
                 capacity = row.get('capacity') or row.get('size')
+                if not name or not capacity: continue
+                name = str(name).strip()
                 
-                if name and capacity:
-                    Hall.objects.create(
-                        project=project,
-                        name=name,
-                        capacity=int(capacity)
-                    )
-                    count += 1
+                # Get or create global Hall
+                hall, _ = Hall.objects.get_or_create(
+                    name=name,
+                    defaults={
+                        'capacity': int(capacity),
+                        'exam_capacity_single': int(row.get('exam_capacity_single') or capacity),
+                        'exam_capacity_mixed': int(row.get('exam_capacity_mixed') or capacity)
+                    }
+                )
+                
+                # Get or create ProjectHall
+                ph, _ = ProjectHall.objects.get_or_create(
+                    project=project,
+                    hall=hall,
+                    defaults={'is_active': True}
+                )
+                count += 1
 
         elif data_type == 'students':
-            # Expected headers: matric no, department, level, course1, course2... OR normalized list
-            # Handling "Student Course Registration" listing
+            import re
             for _, row in df.iterrows():
                 matric = row.get('matric no') or row.get('matric_no') or row.get('student id')
                 if not matric: continue
+                matric = str(matric).strip().upper()
                 
-                # Get or Create Student
+                # Get or Create Student (Global)
                 student, _ = Student.objects.get_or_create(
-                    project=project, 
                     matric_no=matric,
                     defaults={
-                        'department': row.get('department', 'Unknown'),
-                        'level': row.get('level', 100)
+                        'department': row.get('department') or 'Unknown',
+                        'level': int(row.get('level') or 100)
                     }
                 )
                 
@@ -70,35 +90,67 @@ def parse_and_import_data(project, file, data_type):
                 for col in course_cols:
                     c_code = row[col]
                     if pd.notna(c_code):
-                        courses_to_add.append(str(c_code).strip())
+                        courses_to_add.append(str(c_code).strip().upper())
                 
                 # If format is narrow (Matric, Course Code)
                 c_narrow = row.get('course code') or row.get('code')
                 if c_narrow:
-                    courses_to_add.append(str(c_narrow).strip())
+                    courses_to_add.append(str(c_narrow).strip().upper())
+                
+                # Determine is_carryover check from row if explicit
+                row_is_carryover = False
+                if 'carryover' in row:
+                    row_is_carryover = bool(row['carryover'])
+                elif 'is_carryover' in row:
+                    row_is_carryover = bool(row['is_carryover'])
 
                 for c_code in courses_to_add:
-                    # Find the course object (it must exist usually, or we create a placeholder)
-                    # For safety in this POC, we get or create the course so imports don't fail order
+                    c_code = str(c_code).strip()
+                    # Get or create global course
                     course, _ = Course.objects.get_or_create(
-                        project=project,
                         code=c_code,
-                        defaults={'title': f'Imported {c_code}'}
+                        defaults={
+                            'department': student.department,
+                            'title': f'Imported {c_code}'
+                        }
                     )
+                    
+                    # Get or create ProjectCourse
+                    project_course, _ = ProjectCourse.objects.get_or_create(
+                        project=project,
+                        course=course,
+                        defaults={
+                            'required_capacity': 0,
+                            'duration_minutes': 120
+                        }
+                    )
+                    
+                    # Level comparison check: if student level > course level
+                    is_carryover = row_is_carryover
+                    if not is_carryover:
+                        course_level_match = re.search(r'\d+', c_code)
+                        if course_level_match:
+                            try:
+                                course_level = int(course_level_match.group()[0]) * 100
+                                if student.level > course_level:
+                                    is_carryover = True
+                            except:
+                                pass
                     
                     Enrollment.objects.get_or_create(
                         project=project,
                         student=student,
-                        course=course
+                        project_course=project_course,
+                        defaults={'is_carryover': is_carryover}
                     )
                     
                 count += 1
                 
         # After importing students, update course required capacity
         if data_type == 'students':
-            for course in Course.objects.filter(project=project):
-                course.required_capacity = Enrollment.objects.filter(project=project, course=course).count()
-                course.save()
+            for pc in ProjectCourse.objects.filter(project=project):
+                pc.required_capacity = Enrollment.objects.filter(project=project, project_course=pc).count()
+                pc.save()
                 
         return count, None
     except Exception as e:

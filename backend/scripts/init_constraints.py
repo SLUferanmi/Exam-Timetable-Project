@@ -20,6 +20,7 @@ def main():
     
     constraint_types = [
         'student_conflict',
+        'carryover_conflict',
         'department_conflict',
         'venue_capacity',
     ]
@@ -27,7 +28,7 @@ def main():
     total_created = 0
     
     for project in projects:
-        print(f"\n📁 Project: {project.name}")
+        print(f"\nProject: {project.name}")
         created_count = 0
         
         for constraint_type in constraint_types:
@@ -40,15 +41,15 @@ def main():
             if created:
                 created_count += 1
                 total_created += 1
-                print(f"   ✓ Created: {constraint.get_constraint_type_display()}")
+                print(f"   [Created] {constraint.get_constraint_type_display()}")
             else:
-                print(f"   - Exists: {constraint.get_constraint_type_display()} ({'Enabled' if constraint.enabled else 'Disabled'})")
+                print(f"   [Exists] {constraint.get_constraint_type_display()} ({'Enabled' if constraint.enabled else 'Disabled'})")
         
         if created_count == 0:
             print(f"   All constraints already exist")
     
     print(f"\n" + "=" * 80)
-    print(f"✅ Initialization complete!")
+    print(f"Initialization complete!")
     print(f"   Total constraints created: {total_created}")
     print("=" * 80)
 

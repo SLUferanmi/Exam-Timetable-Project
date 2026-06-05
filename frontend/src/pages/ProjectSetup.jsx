@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import Layout from '../components/Layout';
-import { Button, Badge } from '../components/UI';
+import { Button, Badge, StatCard } from '../components/UI';
 import api from '../api';
 import { ArrowLeft, Calendar, BookMarked, Building2, CheckCircle2, AlertCircle, Plus, Pencil, Trash2, Settings } from 'lucide-react';
 
@@ -32,6 +32,29 @@ const ProjectSetup = () => {
     const [editingItem, setEditingItem] = useState(null);
 
     const COURSES_PAGE_SIZE = 25;
+
+    // Analysis state
+    const [analysisData, setAnalysisData] = useState(null);
+    const [loadingAnalysis, setLoadingAnalysis] = useState(false);
+    const [analysisSearch, setAnalysisSearch] = useState('');
+
+    const fetchAnalysisData = async () => {
+        setLoadingAnalysis(true);
+        try {
+            const res = await api.get(`projects/${id}/carryovers_and_conflicts/`);
+            setAnalysisData(res.data);
+        } catch (error) {
+            console.error('Error fetching analysis data:', error);
+        } finally {
+            setLoadingAnalysis(false);
+        }
+    };
+
+    useEffect(() => {
+        if (activeTab === 'analysis') {
+            fetchAnalysisData();
+        }
+    }, [activeTab, id]);
 
     useEffect(() => {
         fetchData();
@@ -66,6 +89,10 @@ const ProjectSetup = () => {
             setHalls(hallsRes.data);
             setConstraints(constraintsRes.data);
             await fetchCourses(1);
+
+            if (activeTab === 'analysis') {
+                await fetchAnalysisData();
+            }
         } catch (error) {
             console.error('Error fetching data:', error);
         } finally {
@@ -180,6 +207,28 @@ const ProjectSetup = () => {
         }
     };
 
+    const filteredCarryovers = (analysisData?.carryover_courses || []).filter(c => {
+        const query = analysisSearch.toLowerCase();
+        return (
+            c.code.toLowerCase().includes(query) ||
+            (c.title || '').toLowerCase().includes(query) ||
+            c.department.toLowerCase().includes(query)
+        );
+    });
+
+    const filteredConflicts = (analysisData?.conflicts || []).filter(conf => {
+        const query = analysisSearch.toLowerCase();
+        return (
+            conf.course_a.code.toLowerCase().includes(query) ||
+            (conf.course_a.title || '').toLowerCase().includes(query) ||
+            conf.course_a.department.toLowerCase().includes(query) ||
+            conf.course_b.code.toLowerCase().includes(query) ||
+            (conf.course_b.title || '').toLowerCase().includes(query) ||
+            conf.course_b.department.toLowerCase().includes(query) ||
+            conf.reasons.some(r => r.toLowerCase().includes(query))
+        );
+    });
+
     if (loading) {
         return (
             <Layout>
@@ -225,7 +274,8 @@ const ProjectSetup = () => {
                             { id: 'dates', label: 'Exam Dates', icon: Calendar },
                             { id: 'courses', label: 'Courses', icon: BookMarked },
                             { id: 'halls', label: 'Halls', icon: Building2 },
-                            { id: 'constraints', label: 'Constraints', icon: Settings }
+                            { id: 'constraints', label: 'Constraints', icon: Settings },
+                            { id: 'analysis', label: 'Carryovers & Conflicts', icon: AlertCircle }
                         ].map(tab => (
                             <button
                                 key={tab.id}
@@ -463,6 +513,180 @@ const ProjectSetup = () => {
                                     </div>
                                 ))}
                             </div>
+                        </div>
+                    )}
+
+                    {/* Carryovers & Conflicts Tab */}
+                    {activeTab === 'analysis' && (
+                        <div className="space-y-6">
+                            <div>
+                                <h2 className="text-lg font-semibold text-stone-900">Carryovers & Conflict Analysis</h2>
+                                <p className="text-sm text-stone-600">
+                                    Analyze carryover student counts per course and preview which course exams cannot hold in the same slot.
+                                </p>
+                            </div>
+
+                            {loadingAnalysis && (
+                                <div className="flex flex-col items-center justify-center py-12 space-y-4">
+                                    <div className="w-12 h-12 border-4 border-amber-600/30 border-t-amber-600 rounded-full animate-spin"></div>
+                                    <p className="text-stone-500 font-medium text-sm">Analyzing courses & conflicts...</p>
+                                </div>
+                            )}
+
+                            {!loadingAnalysis && analysisData && (
+                                <>
+                                    {/* Stat Cards */}
+                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                        <StatCard
+                                            title="Carryover Courses"
+                                            value={analysisData.carryover_courses?.length || 0}
+                                            icon={BookMarked}
+                                            color="brown"
+                                        />
+                                        <StatCard
+                                            title="Total Carryover Enrollments"
+                                            value={analysisData.carryover_courses?.reduce((acc, c) => acc + c.student_count, 0) || 0}
+                                            icon={CheckCircle2}
+                                            color="green"
+                                        />
+                                        <StatCard
+                                            title="Total Clashing Pairs"
+                                            value={analysisData.conflicts?.length || 0}
+                                            icon={AlertCircle}
+                                            color="orange"
+                                        />
+                                    </div>
+
+                                    {/* Search Bar */}
+                                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pt-2">
+                                        <div className="flex-1 max-w-md">
+                                            <input
+                                                type="text"
+                                                placeholder="Search code, title, department, or reasons..."
+                                                value={analysisSearch}
+                                                onChange={(e) => setAnalysisSearch(e.target.value)}
+                                                className="w-full px-4 py-2 text-sm border border-stone-300 rounded-lg focus:ring-2 focus:ring-amber-500 focus:outline-none placeholder-stone-400"
+                                            />
+                                        </div>
+                                        {analysisSearch && (
+                                            <button
+                                                onClick={() => setAnalysisSearch('')}
+                                                className="text-sm text-stone-500 hover:text-stone-900 font-medium"
+                                            >
+                                                Clear search query
+                                            </button>
+                                        )}
+                                    </div>
+
+                                    {/* Tables Grid */}
+                                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                                        {/* Left: Carryovers */}
+                                        <div className="space-y-4">
+                                            <div className="flex items-center justify-between border-b border-stone-100 pb-2">
+                                                <h3 className="font-bold text-stone-900 flex items-center gap-2">
+                                                    <BookMarked size={18} className="text-amber-700" />
+                                                    Carryover Courses
+                                                </h3>
+                                                <Badge variant="warning">{filteredCarryovers.length} listed</Badge>
+                                            </div>
+
+                                            <div className="overflow-x-auto rounded-lg border border-stone-200 max-h-[450px] overflow-y-auto">
+                                                <table className="w-full text-left border-collapse">
+                                                    <thead className="bg-stone-50 sticky top-0 z-10 border-b border-stone-200">
+                                                        <tr>
+                                                            <th className="p-3 text-xs font-semibold text-stone-600 uppercase">Course</th>
+                                                            <th className="p-3 text-xs font-semibold text-stone-600 uppercase">Department</th>
+                                                            <th className="p-3 text-xs font-semibold text-stone-600 uppercase text-center">Carryovers</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody className="divide-y divide-stone-100 bg-white">
+                                                        {filteredCarryovers.length === 0 ? (
+                                                            <tr>
+                                                                <td colSpan="3" className="p-8 text-center text-stone-400 text-sm">
+                                                                    No carryover courses found matching search.
+                                                                </td>
+                                                            </tr>
+                                                        ) : (
+                                                            filteredCarryovers.map((c) => (
+                                                                <tr key={c.code} className="hover:bg-stone-50 transition-colors">
+                                                                    <td className="p-3">
+                                                                        <div className="font-semibold text-stone-900 text-sm">{c.code}</div>
+                                                                        <div className="text-xs text-stone-500 line-clamp-1">{c.title || 'No Title'}</div>
+                                                                    </td>
+                                                                    <td className="p-3 text-sm text-stone-600">{c.department}</td>
+                                                                    <td className="p-3 text-center">
+                                                                        <span className="inline-flex items-center justify-center px-2.5 py-0.5 bg-amber-50 text-amber-700 rounded-full font-bold text-xs border border-amber-200 min-w-[28px]">
+                                                                            {c.student_count}
+                                                                        </span>
+                                                                    </td>
+                                                                </tr>
+                                                            ))
+                                                        )}
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        </div>
+
+                                        {/* Right: Clashing pairs */}
+                                        <div className="space-y-4">
+                                            <div className="flex items-center justify-between border-b border-stone-100 pb-2">
+                                                <h3 className="font-bold text-stone-900 flex items-center gap-2">
+                                                    <AlertCircle size={18} className="text-red-600" />
+                                                    Mutually Exclusive Courses (Clashes)
+                                                </h3>
+                                                <Badge variant="danger">{filteredConflicts.length} clash(es)</Badge>
+                                            </div>
+
+                                            <div className="space-y-3 max-h-[450px] overflow-y-auto pr-1">
+                                                {filteredConflicts.length === 0 ? (
+                                                    <div className="p-8 border border-dashed border-stone-200 rounded-xl text-center text-stone-400 text-sm">
+                                                        No clashing courses found matching search.
+                                                    </div>
+                                                ) : (
+                                                    filteredConflicts.map((conf, index) => (
+                                                        <div
+                                                            key={index}
+                                                            className="p-4 bg-white border border-stone-200 rounded-xl shadow-sm hover:border-red-200 transition-colors space-y-3"
+                                                        >
+                                                            <div className="flex items-center justify-between gap-2">
+                                                                <div className="flex-1">
+                                                                    <div className="font-bold text-stone-900 text-sm">{conf.course_a.code}</div>
+                                                                    <div className="text-xs text-stone-500 line-clamp-1">{conf.course_a.title || 'No Title'}</div>
+                                                                </div>
+                                                                <div className="text-[10px] font-bold text-stone-400 uppercase tracking-wider px-2 py-0.5 bg-stone-100 rounded">
+                                                                    VS
+                                                                </div>
+                                                                <div className="flex-1 text-right">
+                                                                    <div className="font-bold text-stone-900 text-sm">{conf.course_b.code}</div>
+                                                                    <div className="text-xs text-stone-500 line-clamp-1">{conf.course_b.title || 'No Title'}</div>
+                                                                </div>
+                                                            </div>
+                                                            
+                                                            <div className="pt-2 border-t border-stone-100 flex flex-wrap gap-1.5">
+                                                                {conf.reasons.map((r, rIdx) => {
+                                                                    const isDept = r.startsWith('Same department');
+                                                                    return (
+                                                                        <span
+                                                                            key={rIdx}
+                                                                            className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium border ${
+                                                                                isDept
+                                                                                    ? 'bg-purple-50 text-purple-700 border-purple-200'
+                                                                                    : 'bg-red-50 text-red-700 border-red-200'
+                                                                            }`}
+                                                                        >
+                                                                            {r}
+                                                                        </span>
+                                                                    );
+                                                                })}
+                                                            </div>
+                                                        </div>
+                                                    ))
+                                                )}
+                                            </div>
+                                        </div>
+                                    </div>
+                                </>
+                            )}
                         </div>
                     )}
                 </div>
