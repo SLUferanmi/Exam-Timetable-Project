@@ -57,7 +57,7 @@ const Layout = ({ children }) => {
     return (
         <div className="flex h-screen bg-stone-50 text-stone-900 overflow-hidden">
             {/* Sidebar */}
-            <div className="w-60 bg-white border-r border-stone-200 flex flex-col z-10 relative">
+            <div className="w-60 bg-white border-r border-stone-200 flex flex-col z-10 relative no-print">
                 {/* Logo */}
                 <div className="px-5 py-5 border-b border-stone-100">
                     <div className="flex items-center space-x-3">

@@ -316,6 +316,30 @@ const ProjectDetail = () => {
         }
     };
 
+    const handleDownload = async (format) => {
+        if (format === 'pdf') {
+            window.print();
+            return;
+        }
+
+        try {
+            const res = await api.get(`projects/${id}/download_timetable/?format=${format}`, {
+                responseType: 'blob'
+            });
+            const url = window.URL.createObjectURL(new Blob([res.data]));
+            const link = document.createElement('a');
+            link.href = url;
+            const extension = format === 'csv' ? 'csv' : 'xlsx';
+            link.setAttribute('download', `timetable_${project?.name || 'export'}.${extension}`);
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+        } catch (error) {
+            console.error('Download error:', error);
+            alert('Failed to download timetable');
+        }
+    };
+
     if (loading) {
         return (
             <Layout>
@@ -358,7 +382,7 @@ const ProjectDetail = () => {
             <div className="space-y-6">
                 {/* Unscheduled Courses Warning Banner */}
                 {unscheduledCourses.length > 0 && (
-                    <div className="bg-orange-50 border border-orange-300 rounded-xl px-6 py-4 flex items-start gap-4">
+                    <div className="bg-orange-50 border border-orange-300 rounded-xl px-6 py-4 flex items-start gap-4 no-print">
                         <AlertTriangle size={22} className="text-orange-500 mt-0.5 shrink-0" />
                         <div>
                             <p className="font-semibold text-orange-900 mb-1">
@@ -381,7 +405,7 @@ const ProjectDetail = () => {
                 )}
 
                 {/* Header */}
-                <div className="bg-white border border-stone-200 shadow-sm rounded-xl p-8">
+                <div className="bg-white border border-stone-200 shadow-sm rounded-xl p-8 no-print">
                     <button
                         onClick={() => navigate('/dashboard')}
                         className="flex items-center gap-2 text-stone-600 hover:text-stone-900 mb-4 transition-colors"
@@ -517,17 +541,50 @@ const ProjectDetail = () => {
                     </div>
                 ) : (
                     <div className="bg-white border border-stone-200 shadow-sm rounded-xl p-6 overflow-x-auto">
-                        <div className="flex justify-between items-center mb-6">
-                            <h2 className="text-2xl font-bold text-stone-900">Examination Timetable</h2>
-                            <div className="flex items-center gap-3">
-                                <Badge variant="success" className="text-sm">
-                                    {uniqueCoursesScheduled} courses scheduled
-                                </Badge>
-                                {totalHallAssignments !== uniqueCoursesScheduled && (
-                                    <Badge variant="default" className="text-xs text-stone-500">
-                                        {totalHallAssignments - uniqueCoursesScheduled} split across halls
+                        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6 border-b border-stone-100 pb-4">
+                            <div>
+                                <h2 className="text-2xl font-bold text-stone-900">
+                                    Examination Timetable
+                                </h2>
+                                <div className="hidden print:block text-sm text-stone-600 mt-1">
+                                    {project?.name} ({project?.academic_session} · {project?.semester})
+                                </div>
+                                <div className="flex flex-wrap items-center gap-2 mt-1.5">
+                                    <Badge variant="success" className="text-xs">
+                                        {uniqueCoursesScheduled} courses scheduled
                                     </Badge>
-                                )}
+                                    {totalHallAssignments !== uniqueCoursesScheduled && (
+                                        <Badge variant="default" className="text-xs text-stone-500">
+                                            {totalHallAssignments - uniqueCoursesScheduled} split across halls
+                                        </Badge>
+                                    )}
+                                </div>
+                            </div>
+                            <div className="flex flex-wrap items-center gap-2 no-print">
+                                <Button 
+                                    onClick={() => handleDownload('excel')} 
+                                    variant="secondary" 
+                                    className="flex items-center gap-1.5 text-xs py-1.5 px-3"
+                                    icon={Download}
+                                >
+                                    Export Excel
+                                </Button>
+                                <Button 
+                                    onClick={() => handleDownload('csv')} 
+                                    variant="secondary" 
+                                    className="flex items-center gap-1.5 text-xs py-1.5 px-3"
+                                    icon={Download}
+                                >
+                                    Export CSV
+                                </Button>
+                                <Button 
+                                    onClick={() => handleDownload('pdf')} 
+                                    variant="primary" 
+                                    className="flex items-center gap-1.5 text-xs py-1.5 px-3"
+                                    icon={Download}
+                                >
+                                    Export PDF / Print
+                                </Button>
                             </div>
                         </div>
 

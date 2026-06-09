@@ -435,6 +435,80 @@ class TimetableProjectViewSet(viewsets.ModelViewSet):
             "conflicts": conflicts
         })
 
+    @action(detail=True, methods=['get'])
+    def download_timetable(self, request, pk=None):
+        import io
+        from django.http import HttpResponse
+        
+        project = self.get_object()
+        export_format = request.query_params.get('format', 'excel').lower()
+        
+        # Query scheduled exams
+        schedules = ExamSchedule.objects.filter(
+            project=project,
+            timeslot__isnull=False
+        ).select_related(
+            'project_course__course',
+            'project_hall__hall',
+            'timeslot'
+        )
+        
+        rows = []
+        for s in schedules:
+            ts = s.timeslot
+            date_str = str(ts.date) if ts else ''
+            time_str = f"{str(ts.start_time)[:5]} - {str(ts.end_time)[:5]}" if ts else ''
+            course_code = s.project_course.course.code
+            course_title = s.project_course.course.title
+            department = s.project_course.course.department
+            hall_name = s.project_hall.hall.name if s.project_hall else 'TBA'
+            student_alloc = s.student_allocation
+            pref_guided = 'Yes' if s.preference_guided else 'No'
+            
+            violations = []
+            if s.constraint_violations:
+                for v in s.constraint_violations:
+                    violations.append(f"{v.get('label', '')}: {v.get('detail', '')}")
+            violations_str = "; ".join(violations) if violations else "None"
+            
+            rows.append({
+                'Date': date_str,
+                'Time Slot': time_str,
+                'Course Code': course_code,
+                'Course Title': course_title,
+                'Department': department,
+                'Venue': hall_name,
+                'Allocated Students': student_alloc,
+                'Preference Guided': pref_guided,
+                'Violations': violations_str
+            })
+            
+        # Sort rows chronologically and logically
+        rows.sort(key=lambda r: (r['Date'], r['Time Slot'], r['Venue'], r['Course Code']))
+        
+        # Build pandas DataFrame
+        df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=[
+            'Date', 'Time Slot', 'Course Code', 'Course Title', 
+            'Department', 'Venue', 'Allocated Students', 'Preference Guided', 'Violations'
+        ])
+        
+        if export_format == 'csv':
+            response = HttpResponse(content_type='text/csv')
+            response['Content-Disposition'] = f'attachment; filename="timetable_{project.name}.csv"'
+            df.to_csv(response, index=False)
+            return response
+        else:
+            # excel
+            buffer = io.BytesIO()
+            df.to_excel(buffer, index=False, engine='openpyxl')
+            response = HttpResponse(
+                buffer.getvalue(),
+                content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            )
+            response['Content-Disposition'] = f'attachment; filename="timetable_{project.name}.xlsx"'
+            return response
+
+
 
 
 # ---------------------------------------------------------------------------
